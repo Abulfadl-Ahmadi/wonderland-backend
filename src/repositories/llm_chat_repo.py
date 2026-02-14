@@ -2,6 +2,7 @@ from decimal import Decimal
 from typing import Any, Mapping, Optional
 
 from django.utils import timezone
+from django.db import transaction
 
 from common.exceptions import DomainError
 from apps.llm_chat.models import (
@@ -9,7 +10,9 @@ from apps.llm_chat.models import (
     LLMModel,
     Message,
     MessageRole,
+    MessageStatus,
     UserLLMPreference,
+    UserProviderCredential,
 )
 
 
@@ -128,6 +131,169 @@ class LLMChatRepository:
             total_cost=LLMChatRepository._to_decimal(cost_data.get("total_cost")),
         )
         LLMChatRepository._touch_conversation(conversation)
+        return message
+
+    @staticmethod
+    def create_streaming_message(
+        conversation: Conversation,
+        model_used: Optional[LLMModel] = None,
+        credential_used: Optional[UserProviderCredential] = None,
+        user=None,
+    ) -> Message:
+        """
+        Create an assistant message with status=STREAMING and empty content.
+
+        Phase 1 of two-phase persistence: creates the message immediately so client
+        can track it by ID while tokens are being streamed.
+
+        Pass user to enforce ownership.
+
+        Args:
+            conversation: The conversation to add the message to.
+            model_used: The LLM model used for this response.
+            credential_used: The credential/API key used.
+            user: User instance (for ownership check).
+
+        Returns:
+            Message: The created message with status=STREAMING.
+        """
+        if user is not None:
+            LLMChatRepository._assert_conversation_owner(conversation, user)
+
+        message = Message.objects.create(
+            conversation=conversation,
+            role=MessageRole.ASSISTANT,
+            content="",  # Empty during streaming
+            status=MessageStatus.STREAMING,
+            model_used=model_used,
+            credential_used=credential_used,
+        )
+        LLMChatRepository._touch_conversation(conversation)
+        return message
+
+    @staticmethod
+    def update_streaming_message_completed(
+        message: Message,
+        content: str,
+        usage: Optional[Mapping[str, Any]] = None,
+        cost: Optional[Mapping[str, Any]] = None,
+        raw_response: Optional[Mapping[str, Any]] = None,
+        user=None,
+    ) -> Message:
+        """
+        Update a STREAMING message to COMPLETED with final content and usage.
+
+        Phase 2 of two-phase persistence: atomically finalizes the message
+        after streaming completes.
+
+        Uses select_for_update() to prevent race conditions.
+
+        Pass user to enforce ownership.
+
+        Args:
+            message: The message to update (must have status=STREAMING).
+            content: The final message content.
+            usage: Dict with prompt_tokens, completion_tokens, total_tokens.
+            cost: Dict with input_cost, output_cost, total_cost.
+            raw_response: The raw API response from the provider.
+            user: User instance (for ownership check).
+
+        Returns:
+            Message: The updated message with status=COMPLETED.
+        """
+        if user is not None:
+            if message.conversation.user_id != user.id:
+                raise DomainError("Message does not belong to the user.")
+
+        usage_data = usage or {}
+        cost_data = cost or {}
+
+        with transaction.atomic():
+            # Lock the message row to prevent concurrent updates
+            message = Message.objects.select_for_update().get(id=message.id)
+            
+            message.content = content
+            message.status = MessageStatus.COMPLETED
+            message.raw_response = raw_response
+            message.prompt_tokens = usage_data.get("prompt_tokens")
+            message.completion_tokens = usage_data.get("completion_tokens")
+            message.total_tokens = usage_data.get("total_tokens")
+            message.input_cost = LLMChatRepository._to_decimal(cost_data.get("input_cost"))
+            message.output_cost = LLMChatRepository._to_decimal(cost_data.get("output_cost"))
+            message.total_cost = LLMChatRepository._to_decimal(cost_data.get("total_cost"))
+            message.updated_at = timezone.now()
+            
+            message.save(
+                update_fields=[
+                    "content",
+                    "status",
+                    "raw_response",
+                    "prompt_tokens",
+                    "completion_tokens",
+                    "total_tokens",
+                    "input_cost",
+                    "output_cost",
+                    "total_cost",
+                    "updated_at",
+                ]
+            )
+
+        LLMChatRepository._touch_conversation(message.conversation)
+        return message
+
+    @staticmethod
+    def update_streaming_message_error(
+        message: Message,
+        error_code: str,
+        error_message: str,
+        raw_response: Optional[Mapping[str, Any]] = None,
+        user=None,
+    ) -> Message:
+        """
+        Update a STREAMING message to ERROR with error details.
+
+        Phase 2 of two-phase persistence: atomically marks the message as failed
+        after streaming error occurs.
+
+        Uses select_for_update() to prevent race conditions.
+
+        Pass user to enforce ownership.
+
+        Args:
+            message: The message to update (must have status=STREAMING).
+            error_code: Error code/identifier (e.g., "openrouter_timeout").
+            error_message: Human-readable error message.
+            raw_response: The raw error response from the provider.
+            user: User instance (for ownership check).
+
+        Returns:
+            Message: The updated message with status=ERROR.
+        """
+        if user is not None:
+            if message.conversation.user_id != user.id:
+                raise DomainError("Message does not belong to the user.")
+
+        with transaction.atomic():
+            # Lock the message row to prevent concurrent updates
+            message = Message.objects.select_for_update().get(id=message.id)
+            
+            message.status = MessageStatus.ERROR
+            message.error_code = error_code
+            message.error_message = error_message
+            message.raw_response = raw_response
+            message.updated_at = timezone.now()
+            
+            message.save(
+                update_fields=[
+                    "status",
+                    "error_code",
+                    "error_message",
+                    "raw_response",
+                    "updated_at",
+                ]
+            )
+
+        LLMChatRepository._touch_conversation(message.conversation)
         return message
 
     @staticmethod

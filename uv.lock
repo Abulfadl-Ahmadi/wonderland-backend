@@ -132,6 +132,19 @@ wheels = [
 ]
 
 [[package]]
+name = "channels"
+version = "4.3.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "asgiref" },
+    { name = "django" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/74/92/b18d4bb54d14986a8b35215a1c9e6a7f9f4d57ca63ac9aee8290ebb4957d/channels-4.3.2.tar.gz", hash = "sha256:f2bb6bfb73ad7fb4705041d07613c7b4e69528f01ef8cb9fb6c21d9295f15667", size = 27023, upload-time = "2025-11-20T15:13:05.102Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/16/34/c32915288b7ef482377b6adc401192f98c6a99b3a145423d3b8aed807898/channels-4.3.2-py3-none-any.whl", hash = "sha256:fef47e9055a603900cf16cef85f050d522d9ac4b3daccf24835bd9580705c176", size = 31313, upload-time = "2025-11-20T15:13:02.357Z" },
+]
+
+[[package]]
 name = "click"
 version = "8.3.1"
 source = { registry = "https://pypi.org/simple" }
@@ -718,6 +731,7 @@ source = { editable = "." }
 dependencies = [
     { name = "amqp" },
     { name = "celery" },
+    { name = "channels" },
     { name = "cryptography" },
     { name = "django" },
     { name = "django-cleanup" },
@@ -736,6 +750,7 @@ dependencies = [
 requires-dist = [
     { name = "amqp", specifier = ">=5.3.1" },
     { name = "celery", specifier = ">=5.6.2" },
+    { name = "channels", specifier = ">=4.0,<5.0" },
     { name = "cryptography", specifier = ">=42.0,<43.0" },
     { name = "django", specifier = ">=5.0,<6.0" },
     { name = "django-cleanup", specifier = ">=9.0.0" },

@@ -13,12 +13,25 @@ class MessageRole(models.TextChoices):
     TOOL = "tool", "Tool"
 
 
+class MessageStatus(models.TextChoices):
+    """Status of a message during its lifecycle."""
+    STREAMING = "streaming", "Streaming (in progress)"
+    COMPLETED = "completed", "Completed"
+    ERROR = "error", "Error"
+
+
 class Message(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     conversation = models.ForeignKey(
         Conversation, on_delete=models.CASCADE, related_name="messages"
     )
     role = models.CharField(max_length=20, choices=MessageRole.choices)
+    status = models.CharField(
+        max_length=20,
+        choices=MessageStatus.choices,
+        default=MessageStatus.COMPLETED,
+        help_text="Message status: streaming (in progress), completed, or error."
+    )
     content = models.TextField()
     model_used = models.ForeignKey(
         LLMModel, on_delete=models.SET_NULL, null=True, blank=True, related_name="messages"
@@ -40,6 +53,7 @@ class Message(models.Model):
     output_cost = models.DecimalField(max_digits=12, decimal_places=6, null=True, blank=True)
     total_cost = models.DecimalField(max_digits=12, decimal_places=6, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, help_text="Last update time for streaming status/completion tracking.")
 
     class Meta:
         verbose_name = "Message"
