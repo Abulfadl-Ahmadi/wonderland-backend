@@ -79,6 +79,75 @@ class OpenRouterService:
             "raw": raw_json,
         }
 
+    @staticmethod
+    def chat_completion_stream(
+        model_slug: str,
+        messages: list[dict[str, Any]],
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ):
+        """
+        Stream LLM response tokens using Server-Sent Events (SSE).
+        Yields dict with keys: 'delta' (str), 'usage' (dict), 'raw' (dict), or 'error' (dict).
+        """
+        base_url, api_keys = OpenRouterService._get_openrouter_config()
+        api_key = OpenRouterService._select_api_key(api_keys)
+
+        payload: dict[str, Any] = {
+            "model": model_slug,
+            "messages": messages,
+            "stream": True,
+        }
+        if temperature is not None:
+            payload["temperature"] = temperature
+        if top_p is not None:
+            payload["top_p"] = top_p
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+
+        url = base_url.rstrip("/") + "/chat/completions"
+        request = Request(
+            url=url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+
+        try:
+            with urlopen(request, timeout=30) as response:
+                for line in response:
+                    line_str = line.decode("utf-8").strip()
+                    if not line_str or line_str == "[DONE]":
+                        continue
+                    if line_str.startswith("data: "):
+                        line_str = line_str[6:]
+                    try:
+                        chunk = json.loads(line_str)
+                        yield OpenRouterService._process_stream_chunk(chunk)
+                    except json.JSONDecodeError:
+                        continue
+        except HTTPError as exc:
+            raw_json = OpenRouterService._read_error_payload(exc)
+            yield {
+                "error": {
+                    "status_code": exc.code,
+                    "error_code": OpenRouterService._extract_error_code(raw_json),
+                    "raw": raw_json,
+                }
+            }
+        except URLError as exc:
+            yield {
+                "error": {
+                    "status_code": None,
+                    "error_code": "network_error",
+                    "raw": {"detail": str(exc)},
+                }
+            }
+
     # ------------------------------------------------------------------
     # INTERNAL HELPERS
     # ------------------------------------------------------------------
@@ -131,3 +200,30 @@ class OpenRouterService:
             return json.loads(raw)
         except Exception:
             return {"detail": "OpenRouter error response could not be parsed."}
+
+    @staticmethod
+    def _process_stream_chunk(chunk: dict[str, Any]) -> dict[str, Any]:
+        """
+        Process a single SSE stream chunk from OpenRouter.
+        Returns dict with 'delta' for content delta, or 'usage'/'raw' for final chunk.
+        """
+        choices = chunk.get("choices") or []
+        if not choices:
+            return {"delta": ""}
+
+        delta_obj = choices[0].get("delta") or {}
+        delta_text = delta_obj.get("content", "")
+
+        # Check if this is the final chunk with usage info
+        usage = chunk.get("usage")
+        if usage:
+            return {
+                "delta": delta_text,
+                "usage": {
+                    "prompt_tokens": usage.get("prompt_tokens"),
+                    "completion_tokens": usage.get("completion_tokens"),
+                    "total_tokens": usage.get("total_tokens"),
+                },
+                "raw": chunk,
+            }
+        return {"delta": delta_text}
