@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wonderland-backend"
+version = "0.1.0"
+description = "Wonderland backend built with Django."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "Django>=5.0,<6.0",
+  "djangorestframework>=3.15,<4.0",
+  "python-dotenv>=1.0,<2.0",
+  "gunicorn>=22.0,<23.0",
+  "celery>=5.6.2",
+  "amqp>=5.3.1",
+  "python-json-logger>=4.0.0",
+  "django-cors-headers>=4.9.0",
+  "django-filter>=25.2",
+  "django-cleanup>=9.0.0",
+  "django-debug-toolbar>=6.2.0",
+  "djangorestframework-simplejwt>=5.5.1",
+  "drf-spectacular>=0.29.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
