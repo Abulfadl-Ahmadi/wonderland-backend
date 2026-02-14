@@ -80,7 +80,7 @@ class OpenRouterService:
         }
 
     @staticmethod
-    def chat_completion_stream(
+    def stream_chat_completion(
         model_slug: str,
         messages: list[dict[str, Any]],
         temperature: Optional[float] = None,
@@ -88,8 +88,15 @@ class OpenRouterService:
         max_tokens: Optional[int] = None,
     ):
         """
-        Stream LLM response tokens using Server-Sent Events (SSE).
-        Yields dict with keys: 'delta' (str), 'usage' (dict), 'raw' (dict), or 'error' (dict).
+        Stream LLM response tokens from OpenRouter in a transport-agnostic way.
+        
+        Yields chunks:
+          - Delta chunk: {"type": "delta", "delta": "text", "raw_chunk": {...}}
+          - Done chunk:  {"type": "done", "delta": "...", "usage": {...}, "raw_response": {...}}
+          - Error chunk: {"type": "error", "error_code": "...", "error_message": "...", "raw": {...}}
+        
+        This generator is transport-agnostic: the consumer (WebSocket, SSE, etc.)
+        decides how to send each chunk. Message persistence is decoupled from streaming.
         """
         base_url, api_keys = OpenRouterService._get_openrouter_config()
         api_key = OpenRouterService._select_api_key(api_keys)
@@ -117,6 +124,9 @@ class OpenRouterService:
             method="POST",
         )
 
+        final_response = None
+        final_usage = None
+
         try:
             with urlopen(request, timeout=30) as response:
                 for line in response:
@@ -127,25 +137,59 @@ class OpenRouterService:
                         line_str = line_str[6:]
                     try:
                         chunk = json.loads(line_str)
-                        yield OpenRouterService._process_stream_chunk(chunk)
+                        # Track final response when usage data arrives
+                        if chunk.get("usage"):
+                            final_response = chunk
+                            final_usage = chunk.get("usage")
+                        # Yield delta chunk
+                        delta = (chunk.get("choices") or [{}])[0].get("delta", {}).get("content", "")
+                        yield {
+                            "type": "delta",
+                            "delta": delta or "",
+                            "raw_chunk": chunk,
+                        }
                     except json.JSONDecodeError:
                         continue
+            
+            # Yield final metadata chunk after stream completes
+            if final_usage:
+                yield {
+                    "type": "done",
+                    "delta": "",
+                    "usage": {
+                        "prompt_tokens": final_usage.get("prompt_tokens"),
+                        "completion_tokens": final_usage.get("completion_tokens"),
+                        "total_tokens": final_usage.get("total_tokens"),
+                    },
+                    "raw_response": final_response,
+                }
+            else:
+                # Stream ended without usage data (shouldn't happen, but handle gracefully)
+                yield {
+                    "type": "done",
+                    "delta": "",
+                    "usage": {
+                        "prompt_tokens": None,
+                        "completion_tokens": None,
+                        "total_tokens": None,
+                    },
+                    "raw_response": None,
+                }
+
         except HTTPError as exc:
             raw_json = OpenRouterService._read_error_payload(exc)
             yield {
-                "error": {
-                    "status_code": exc.code,
-                    "error_code": OpenRouterService._extract_error_code(raw_json),
-                    "raw": raw_json,
-                }
+                "type": "error",
+                "error_code": OpenRouterService._extract_error_code(raw_json) or "http_error",
+                "error_message": f"OpenRouter HTTP {exc.code}",
+                "raw": raw_json,
             }
         except URLError as exc:
             yield {
-                "error": {
-                    "status_code": None,
-                    "error_code": "network_error",
-                    "raw": {"detail": str(exc)},
-                }
+                "type": "error",
+                "error_code": "network_error",
+                "error_message": str(exc),
+                "raw": {"detail": str(exc)},
             }
 
     # ------------------------------------------------------------------
@@ -200,30 +244,3 @@ class OpenRouterService:
             return json.loads(raw)
         except Exception:
             return {"detail": "OpenRouter error response could not be parsed."}
-
-    @staticmethod
-    def _process_stream_chunk(chunk: dict[str, Any]) -> dict[str, Any]:
-        """
-        Process a single SSE stream chunk from OpenRouter.
-        Returns dict with 'delta' for content delta, or 'usage'/'raw' for final chunk.
-        """
-        choices = chunk.get("choices") or []
-        if not choices:
-            return {"delta": ""}
-
-        delta_obj = choices[0].get("delta") or {}
-        delta_text = delta_obj.get("content", "")
-
-        # Check if this is the final chunk with usage info
-        usage = chunk.get("usage")
-        if usage:
-            return {
-                "delta": delta_text,
-                "usage": {
-                    "prompt_tokens": usage.get("prompt_tokens"),
-                    "completion_tokens": usage.get("completion_tokens"),
-                    "total_tokens": usage.get("total_tokens"),
-                },
-                "raw": chunk,
-            }
-        return {"delta": delta_text}

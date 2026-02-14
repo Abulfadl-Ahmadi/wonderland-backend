@@ -11,7 +11,7 @@ from channels.db import database_sync_to_async
 from common.exceptions import OpenRouterError, DomainError
 from repositories import LLMChatRepository
 from selectors_layer import LLMChatSelectors
-from services import OpenRouterService
+from services import LLMService
 from apps.llm_chat.models import LLMModel, UserProviderCredential
 
 logger = logging.getLogger("app.ws.chat_consumer")
@@ -181,6 +181,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
     ):
         """
         Stream LLM response tokens and store the complete message with usage.
+        Consumes transport-agnostic generator from OpenRouterService.
         """
         assistant_text = ""
         usage_data = None
@@ -193,29 +194,32 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 model_slug=model.slug,
                 messages=messages_context,
             ):
+                chunk_type = chunk.get("type")
+                
                 # Handle error chunks
-                if "error" in chunk:
-                    error_info = chunk["error"]
+                if chunk_type == "error":
                     error_data = {
-                        "code": error_info.get("error_code", "openrouter_error"),
-                        "message": f"OpenRouter error: {error_info.get('error_code', 'unknown')}",
+                        "code": chunk.get("error_code", "openrouter_error"),
+                        "message": f"OpenRouter error: {chunk.get('error_code', 'unknown')}",
                     }
+                    logger.warning(f"OpenRouter error: {chunk.get('error_code')} - {chunk.get('error_message')}")
                     await self.send_error(error_data["message"])
                     return
                 
-                # Extract delta and send to client
-                delta = chunk.get("delta", "")
-                if delta:
-                    assistant_text += delta
-                    await self.send_json({
-                        "type": "assistant.delta",
-                        "delta": delta,
-                    })
+                # Handle delta chunks (streaming tokens)
+                if chunk_type == "delta":
+                    delta = chunk.get("delta", "")
+                    if delta:
+                        assistant_text += delta
+                        await self.send_json({
+                            "type": "assistant.delta",
+                            "delta": delta,
+                        })
                 
-                # Store usage info from final chunk
-                if "usage" in chunk:
-                    usage_data = chunk["usage"]
-                    raw_response = chunk.get("raw")
+                # Handle done chunk (final metadata)
+                if chunk_type == "done":
+                    usage_data = chunk.get("usage")
+                    raw_response = chunk.get("raw_response")
             
             # Compute costs from usage
             cost_data = await self._compute_costs(model, usage_data or {})
@@ -448,12 +452,13 @@ class ChatConsumer(AsyncWebsocketConsumer):
         messages: list[dict[str, Any]],
     ):
         """
-        Stream LLM response tokens using OpenRouter API.
-        Yields chunks: {"delta": "...", "usage": {...}, "raw": {...}} or {"error": {...}}
+        Stream LLM response tokens using transport-agnostic LLMService.
+        Runs blocking generator in thread pool.
+        Yields chunks: {"type": "delta", ...} or {"type": "done", ...} or {"type": "error", ...}
         """
-        # Run blocking OpenRouter call in thread pool
+        # Run blocking LLM generator in thread pool
         result_generator = await self._run_in_executor(
-            OpenRouterService.chat_completion_stream,
+            LLMService.stream_completion,
             model_slug,
             messages,
         )
