@@ -29,6 +29,7 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     # 3rd party apps
+    "channels",
     "corsheaders",
     "django_filters",
     "rest_framework",
@@ -59,6 +60,7 @@ MIDDLEWARE = [
 # URL Configuration
 # ---------------------------------------------------------------
 ROOT_URLCONF = "config.urls"
+ASGI_APPLICATION = "config.asgi.application"
 WSGI_APPLICATION = "config.wsgi.application"
 
 TEMPLATES = [
@@ -166,4 +168,13 @@ SIMPLE_JWT = {
     "REFRESH_TOKEN_LIFETIME": timedelta(hours=ENV_HOURS),
     "AUTH_HEADER_TYPES": ("Bearer",),
     "UPDATE_LAST_LOGIN": True,
+}
+
+# ---------------------------------------------------------------
+# Django Channels Configuration
+# ---------------------------------------------------------------
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels.layers.InMemoryChannelLayer",
+    }
 }
