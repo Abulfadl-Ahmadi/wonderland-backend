@@ -36,6 +36,7 @@ urlpatterns = [
     # API v1 routes
     path(base_url + "v1/accounts/", include("apps.accounts.api.v1.urls")),
     path(base_url + "v1/authentication/", include("apps.authentication.api.v1.urls")),
+    path(base_url + "v1/chat/", include("apps.llm_chat.api.v1.urls")),
 ]
 
 

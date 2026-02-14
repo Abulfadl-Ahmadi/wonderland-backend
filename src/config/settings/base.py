@@ -37,6 +37,7 @@ INSTALLED_APPS = [
     # Custom apps
     "apps.accounts",
     "apps.authentication",
+    "apps.llm_chat",
 ]
 
 # ---------------------------------------------------------------
