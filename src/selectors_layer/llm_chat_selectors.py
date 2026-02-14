@@ -1,5 +1,7 @@
 from typing import Any, Optional, Tuple
 
+from django.db.models import Prefetch
+
 from apps.llm_chat.models import Conversation, LLMModel, Message, UserLLMPreference
 
 
@@ -18,18 +20,30 @@ class LLMChatSelectors:
 
     @staticmethod
     def list_user_conversations(user, pagination=None):
+        last_message_prefetch = Prefetch(
+            "messages",
+            queryset=Message.objects.order_by("-created_at")[:1],
+            to_attr="last_message_list",
+        )
         queryset = (
             Conversation.objects.filter(user=user)
             .select_related("user")
+            .prefetch_related(last_message_prefetch)
             .order_by("-updated_at")
         )
         return LLMChatSelectors._paginate_queryset(queryset, pagination)
 
     @staticmethod
     def get_user_conversation_detail(user, conversation_id) -> Optional[Conversation]:
+        last_message_prefetch = Prefetch(
+            "messages",
+            queryset=Message.objects.order_by("-created_at")[:1],
+            to_attr="last_message_list",
+        )
         return (
             Conversation.objects.filter(user=user, id=conversation_id)
             .select_related("user")
+            .prefetch_related(last_message_prefetch)
             .first()
         )
 
