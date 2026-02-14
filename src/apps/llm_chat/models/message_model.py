@@ -3,6 +3,7 @@ from django.db import models
 
 from .conversation_model import Conversation
 from .llm_model import LLMModel
+from .provider_credential_model import UserProviderCredential
 
 
 class MessageRole(models.TextChoices):
@@ -21,6 +22,13 @@ class Message(models.Model):
     content = models.TextField()
     model_used = models.ForeignKey(
         LLMModel, on_delete=models.SET_NULL, null=True, blank=True, related_name="messages"
+    )
+    credential_used = models.ForeignKey(
+        UserProviderCredential,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="messages",
     )
     raw_response = models.JSONField(null=True, blank=True)
     error_code = models.CharField(max_length=100, null=True, blank=True)

@@ -3,6 +3,7 @@ from django.conf import settings
 from django.db import models
 
 from .llm_model import LLMModel
+from .provider_credential_model import UserProviderCredential
 
 
 class UserLLMPreference(models.Model):
@@ -18,6 +19,13 @@ class UserLLMPreference(models.Model):
         null=True,
         blank=True,
         related_name="user_preferences",
+    )
+    default_credential = models.ForeignKey(
+        UserProviderCredential,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="preferences",
     )
     temperature = models.DecimalField(max_digits=4, decimal_places=3, null=True, blank=True)
     top_p = models.DecimalField(max_digits=4, decimal_places=3, null=True, blank=True)

@@ -1,1 +1,2 @@
 from .normalize_phone import normalize_iran_mobile
+from .encrypted_field import EncryptedTextField
