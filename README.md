@@ -18,9 +18,20 @@ Django backend skeleton for a LLM chat platform.
    python manage.py runserver
    ```
 
+## Required environment variables
+
+- `SECRET_KEY` (required in non-test environments)
+- `OPENROUTER_API_KEYS` (comma-separated)
+- `OPENROUTER_BASE_URL` (optional; defaults to `https://openrouter.ai/api/v1`)
+- `CREDENTIALS_ENCRYPTION_KEY` (Fernet key for stored provider credentials)
+- `REDIS_URL` (required for production Channels; defaults to `redis://localhost:6379/1`)
+- `LLM_CHAT_MAX_MESSAGE_LENGTH` (optional; defaults to `4000`)
+
 ## WebSocket protocol (frontend contract)
 
 WebSocket path: `/ws/chat/`
+
+Authentication: JWT Bearer token via `Authorization` header or `?token=<jwt>` query string.
 
 ### Events from client
 
@@ -86,3 +97,9 @@ WebSocket path: `/ws/chat/`
 - `delta` contains only new text (no previously-sent content).
 - `assistant.done` includes final `usage` and `cost`.
 - `assistant.error` terminates the current stream.
+
+## Channels production requirement
+
+Production must use Redis for the Channels layer. Set `REDIS_URL` and ensure a Redis
+instance is reachable by the backend runtime. In-memory channel layers are only used
+in local and test settings.

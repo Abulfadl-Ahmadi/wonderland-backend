@@ -45,7 +45,6 @@ INSTALLED_APPS = [
 # Middleware Configuration
 # ---------------------------------------------------------------
 MIDDLEWARE = [
-    "debug_toolbar.middleware.DebugToolbarMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -111,8 +110,7 @@ STATIC_URL = "/static/"
 # ---------------------------------------------------------------
 REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": [
-        # "rest_framework.permissions.IsAuthenticated",
-        "rest_framework.permissions.AllowAny",
+        "rest_framework.permissions.IsAuthenticated",
     ],
     "DEFAULT_PAGINATION_CLASS": "common.pagination.DefaultPagination",
     "DEFAULT_AUTHENTICATION_CLASSES": [
@@ -175,6 +173,14 @@ SIMPLE_JWT = {
 # ---------------------------------------------------------------
 CHANNEL_LAYERS = {
     "default": {
-        "BACKEND": "channels.layers.InMemoryChannelLayer",
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {
+            "hosts": [ENV_REDIS_URL],
+        },
     }
 }
+
+# ---------------------------------------------------------------
+# LLM Chat Configuration
+# ---------------------------------------------------------------
+LLM_CHAT_MAX_MESSAGE_LENGTH = ENV_LLM_CHAT_MAX_MESSAGE_LENGTH

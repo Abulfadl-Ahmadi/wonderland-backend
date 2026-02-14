@@ -8,10 +8,20 @@ load_dotenv()
 WONDERLAND_STAGE = os.getenv("WONDERLAND_STAGE", "development")
 
 
-ENV_SECRET_KEY: str = os.getenv("SECRET_KEY", "secret-key")
+def _is_test_environment() -> bool:
+    settings_module = os.getenv("DJANGO_SETTINGS_MODULE", "")
+    return settings_module.endswith(".test") or settings_module.endswith(".tests")
+
+
+ENV_SECRET_KEY: str | None = os.getenv("SECRET_KEY")
+if not ENV_SECRET_KEY and not _is_test_environment():
+    raise RuntimeError("SECRET_KEY must be set in non-test environments.")
 
 ENV_BASE_URL: str = os.getenv("BASE_URL", "api/")
 ENV_ADMIN_URL: str = os.getenv("ADMIN_URL", "admin/")
+
+ENV_REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/1")
+ENV_LLM_CHAT_MAX_MESSAGE_LENGTH: int = int(os.getenv("LLM_CHAT_MAX_MESSAGE_LENGTH", 4000))
 
 
 # ---------------------------------------------------------------

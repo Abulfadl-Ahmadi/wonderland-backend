@@ -10,7 +10,7 @@ Design:
 - Consumer decides persistence, formatting, and transport
 """
 
-from typing import Any, Generator, Mapping, Optional
+from typing import Any, Generator, Mapping, Optional, AsyncGenerator
 
 from services.openrouter_service import OpenRouterService
 
@@ -30,6 +30,8 @@ class LLMService:
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
     ) -> Generator[dict[str, Any], None, None]:
         """
         Stream LLM response in a transport-agnostic format.
@@ -77,6 +79,8 @@ class LLMService:
                 temperature=temperature,
                 top_p=top_p,
                 max_tokens=max_tokens,
+                api_key=api_key,
+                base_url=base_url,
             )
         else:
             yield {
@@ -93,6 +97,8 @@ class LLMService:
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
     ) -> Generator[dict[str, Any], None, None]:
         """
         Delegate to OpenRouterService streaming.
@@ -103,7 +109,42 @@ class LLMService:
             temperature=temperature,
             top_p=top_p,
             max_tokens=max_tokens,
+            api_key=api_key,
+            base_url=base_url,
         )
+
+    @staticmethod
+    async def stream_completion_async(
+        model_slug: str,
+        messages: list[dict[str, Any]],
+        provider: str = "openrouter",
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """
+        Async streaming interface for transport layers.
+        """
+        if provider == "openrouter":
+            async for chunk in OpenRouterService.stream_chat_completion_async(
+                model_slug=model_slug,
+                messages=messages,
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens,
+                api_key=api_key,
+                base_url=base_url,
+            ):
+                yield chunk
+        else:
+            yield {
+                "type": "error",
+                "error_code": "unsupported_provider",
+                "error_message": f"LLM provider '{provider}' not supported. Use 'openrouter'.",
+                "raw": {},
+            }
 
     @staticmethod
     def get_model_info(model_slug: str, provider: str = "openrouter") -> Optional[dict[str, Any]]:

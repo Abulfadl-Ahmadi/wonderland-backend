@@ -17,6 +17,12 @@ DATABASES = {
 INSTALLED_APPS.append("debug_toolbar")
 MIDDLEWARE.insert(0, "debug_toolbar.middleware.DebugToolbarMiddleware")
 
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels.layers.InMemoryChannelLayer",
+    }
+}
+
 
 # ---------------------------------------------------------------
 # Allowed Hosts & Internal IPs

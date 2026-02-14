@@ -1,4 +1,3 @@
-import json
 import logging
 import asyncio
 from decimal import Decimal
@@ -7,11 +6,12 @@ from typing import Any, Optional
 
 from channels.generic.websocket import AsyncWebsocketConsumer
 from channels.db import database_sync_to_async
+from django.conf import settings
 
-from common.exceptions import OpenRouterError, DomainError
+from common.exceptions import DomainError
 from repositories import LLMChatRepository
 from selectors_layer import LLMChatSelectors
-from services import LLMService
+from services import ChatStreamService
 from apps.llm_chat.models import LLMModel, UserProviderCredential
 
 logger = logging.getLogger("app.ws.chat_consumer")
@@ -44,6 +44,10 @@ class ChatConsumer(AsyncWebsocketConsumer):
         Rejects if not authenticated.
         """
         user = self.scope.get("user")
+        if self.scope.get("jwt_invalid"):
+            logger.info("Rejecting WebSocket connection due to invalid JWT")
+            await self.close(code=4001)
+            return
         
         if not user or not user.is_authenticated:
             logger.info("Rejecting unauthenticated WebSocket connection")
@@ -51,6 +55,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
             return
         
         self.user = user
+        self._stream_task: Optional[asyncio.Task] = None
         await self.accept()
         logger.info(f"User {user.id} ({user.phone_number}) connected to chat WebSocket")
 
@@ -58,6 +63,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
         """
         Handle WebSocket disconnection.
         """
+        if self._stream_task and not self._stream_task.done():
+            self._stream_task.cancel()
         user_info = getattr(self, "user", None)
         if user_info:
             logger.info(f"User {user_info.id} ({user_info.phone_number}) disconnected from chat WebSocket (code: {close_code})")
@@ -73,6 +80,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
             
             if message_type == "send":
                 await self.handle_send(content.get("payload", {}))
+            elif message_type == "ping":
+                await self.send_json({"type": "pong"})
             else:
                 await self.send_error(f"Unknown message type: {message_type}")
         except Exception as exc:
@@ -88,6 +97,9 @@ class ChatConsumer(AsyncWebsocketConsumer):
         4. Store assistant message with usage
         """
         try:
+            if not isinstance(payload, dict):
+                await self.send_error("Invalid payload format")
+                return
             # Extract and validate payload
             conversation_id_raw = payload.get("conversation_id")
             content = payload.get("content", "").strip()
@@ -100,6 +112,9 @@ class ChatConsumer(AsyncWebsocketConsumer):
             
             if not content:
                 await self.send_error("Missing or empty content")
+                return
+            if len(content) > settings.LLM_CHAT_MAX_MESSAGE_LENGTH:
+                await self.send_error("Content exceeds maximum length")
                 return
             
             # Parse IDs
@@ -159,12 +174,15 @@ class ChatConsumer(AsyncWebsocketConsumer):
             messages_context = await self._build_message_context(conversation)
             
             # Stream LLM response
-            await self._stream_and_store_response(
-                conversation=conversation,
-                model=model,
-                credential=credential,
-                messages_context=messages_context,
+            self._stream_task = asyncio.create_task(
+                self._stream_and_store_response(
+                    conversation=conversation,
+                    model=model,
+                    credential=credential,
+                    messages_context=messages_context,
+                )
             )
+            await self._stream_task
         except DomainError as exc:
             logger.warning(f"Domain error in handle_send: {exc}")
             await self.send_error(str(exc))
@@ -187,12 +205,22 @@ class ChatConsumer(AsyncWebsocketConsumer):
         usage_data = None
         raw_response = None
         error_data = None
+        message_id = None
+        streaming_message = None
         
         try:
+            streaming_message = await self._create_streaming_message(
+                conversation=conversation,
+                model=model,
+                credential=credential,
+            )
+            message_id = str(streaming_message.id)
+
             # Stream tokens from OpenRouter
-            async for chunk in self._stream_openrouter(
-                model_slug=model.slug,
+            async for chunk in ChatStreamService.stream_response(
+                model=model,
                 messages=messages_context,
+                api_key=credential.secret if credential else None,
             ):
                 chunk_type = chunk.get("type")
                 
@@ -200,10 +228,17 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 if chunk_type == "error":
                     error_data = {
                         "code": chunk.get("error_code", "openrouter_error"),
-                        "message": f"OpenRouter error: {chunk.get('error_code', 'unknown')}",
+                        "message": chunk.get("error_message") or "OpenRouter error",
                     }
-                    logger.warning(f"OpenRouter error: {chunk.get('error_code')} - {chunk.get('error_message')}")
-                    await self.send_error(error_data["message"])
+                    logger.warning("OpenRouter error during stream")
+                    await self.send_error(error_data["message"], message_id=message_id)
+                    if streaming_message:
+                        await self._update_streaming_message_error(
+                            message=streaming_message,
+                            error_code=error_data["code"],
+                            error_message=error_data["message"],
+                            raw_response=chunk.get("raw"),
+                        )
                     return
                 
                 # Handle delta chunks (streaming tokens)
@@ -213,6 +248,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
                         assistant_text += delta
                         await self.send_json({
                             "type": "assistant.delta",
+                            "message_id": message_id,
                             "delta": delta,
                         })
                 
@@ -225,18 +261,15 @@ class ChatConsumer(AsyncWebsocketConsumer):
             cost_data = await self._compute_costs(model, usage_data or {})
             
             # Store assistant message with usage and cost
-            assistant_message = await self._create_assistant_message(
-                conversation=conversation,
+            assistant_message = await self._update_streaming_message_completed(
+                message=streaming_message,
                 content=assistant_text,
-                model=model,
-                credential=credential,
                 usage=usage_data or {},
                 cost=cost_data,
                 raw_response=raw_response,
-                error=None,
             )
             
-            logger.info(f"Created assistant message {assistant_message.id} with {usage_data.get('total_tokens', 'unknown') if usage_data else 'unknown'} tokens")
+            logger.info(f"Completed assistant message {assistant_message.id} with {usage_data.get('total_tokens', 'unknown') if usage_data else 'unknown'} tokens")
             
             # Send completion event with usage
             await self.send_json({
@@ -253,23 +286,31 @@ class ChatConsumer(AsyncWebsocketConsumer):
                     "totalCost": str(cost_data.get("total_cost") or 0),
                 },
             })
-        except OpenRouterError as exc:
-            logger.exception(f"OpenRouter error: {exc}")
-            error_msg = f"LLM service error: {exc.error_code or 'unknown error'}"
-            await self.send_error(error_msg)
+        except asyncio.CancelledError:
+            if streaming_message:
+                await self._update_streaming_message_error(
+                    message=streaming_message,
+                    error_code="client_disconnected",
+                    error_message="Client disconnected during streaming",
+                    raw_response=None,
+                )
+            raise
         except Exception as exc:
             logger.exception(f"Error in _stream_and_store_response: {exc}")
-            await self.send_error(f"Error streaming response: {str(exc)}")
+            await self.send_error(f"Error streaming response: {str(exc)}", message_id=message_id)
 
-    async def send_error(self, error_message: str):
+    async def send_error(self, error_message: str, message_id: Optional[str] = None):
         """
         Send error message to client.
         """
         try:
-            await self.send_json({
+            payload = {
                 "type": "assistant.error",
                 "error": error_message,
-            })
+            }
+            if message_id:
+                payload["message_id"] = message_id
+            await self.send_json(payload)
         except Exception as exc:
             logger.exception(f"Error sending error message: {exc}")
 
@@ -431,6 +472,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
             conversation=conversation,
             content=content,
             model_used=model,
+            credential_used=credential,
             usage=usage,
             cost={
                 "input_cost": cost.get("input_cost"),
@@ -442,35 +484,55 @@ class ChatConsumer(AsyncWebsocketConsumer):
             user=self.user,
         )
 
-    # ====================================================================
-    # ASYNC STREAMING HELPERS
-    # ====================================================================
-
-    async def _stream_openrouter(
+    @database_sync_to_async
+    def _create_streaming_message(
         self,
-        model_slug: str,
-        messages: list[dict[str, Any]],
+        conversation: Any,
+        model: LLMModel,
+        credential: Optional[UserProviderCredential],
     ):
-        """
-        Stream LLM response tokens using transport-agnostic LLMService.
-        Runs blocking generator in thread pool.
-        Yields chunks: {"type": "delta", ...} or {"type": "done", ...} or {"type": "error", ...}
-        """
-        # Run blocking LLM generator in thread pool
-        result_generator = await self._run_in_executor(
-            LLMService.stream_completion,
-            model_slug,
-            messages,
+        return LLMChatRepository.create_streaming_message(
+            conversation=conversation,
+            model_used=model,
+            credential_used=credential,
+            user=self.user,
         )
-        
-        # Yield each chunk from the generator
-        for chunk in result_generator:
-            yield chunk
 
-    async def _run_in_executor(self, func, *args):
-        """
-        Run a blocking function (OpenRouter generator) in thread pool.
-        Returns the generator/result.
-        """
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, func, *args)
+    @database_sync_to_async
+    def _update_streaming_message_completed(
+        self,
+        message,
+        content: str,
+        usage: dict[str, Any],
+        cost: dict[str, Decimal],
+        raw_response: Optional[dict[str, Any]],
+    ):
+        return LLMChatRepository.update_streaming_message_completed(
+            message=message,
+            content=content,
+            usage=usage,
+            cost={
+                "input_cost": cost.get("input_cost"),
+                "output_cost": cost.get("output_cost"),
+                "total_cost": cost.get("total_cost"),
+            },
+            raw_response=raw_response,
+            user=self.user,
+        )
+
+    @database_sync_to_async
+    def _update_streaming_message_error(
+        self,
+        message,
+        error_code: str,
+        error_message: str,
+        raw_response: Optional[dict[str, Any]],
+    ):
+        return LLMChatRepository.update_streaming_message_error(
+            message=message,
+            error_code=error_code,
+            error_message=error_message,
+            raw_response=raw_response,
+            user=self.user,
+        )
+

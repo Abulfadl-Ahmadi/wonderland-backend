@@ -2,9 +2,11 @@ import json
 import os
 import threading
 import itertools
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, AsyncGenerator
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+import httpx
 
 from common.exceptions import OpenRouterConfigError, OpenRouterError
 
@@ -24,9 +26,13 @@ class OpenRouterService:
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
     ) -> dict[str, Any]:
-        base_url, api_keys = OpenRouterService._get_openrouter_config()
-        api_key = OpenRouterService._select_api_key(api_keys)
+        base_url, api_key = OpenRouterService._resolve_config(
+            api_key=api_key,
+            base_url=base_url,
+        )
 
         payload: dict[str, Any] = {
             "model": model_slug,
@@ -86,6 +92,8 @@ class OpenRouterService:
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
     ):
         """
         Stream LLM response tokens from OpenRouter in a transport-agnostic way.
@@ -98,8 +106,10 @@ class OpenRouterService:
         This generator is transport-agnostic: the consumer (WebSocket, SSE, etc.)
         decides how to send each chunk. Message persistence is decoupled from streaming.
         """
-        base_url, api_keys = OpenRouterService._get_openrouter_config()
-        api_key = OpenRouterService._select_api_key(api_keys)
+        base_url, api_key = OpenRouterService._resolve_config(
+            api_key=api_key,
+            base_url=base_url,
+        )
 
         payload: dict[str, Any] = {
             "model": model_slug,
@@ -192,6 +202,111 @@ class OpenRouterService:
                 "raw": {"detail": str(exc)},
             }
 
+    @staticmethod
+    async def stream_chat_completion_async(
+        model_slug: str,
+        messages: list[dict[str, Any]],
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """
+        Async streaming for OpenRouter chat completions.
+
+        Yields the same chunk contract as stream_chat_completion().
+        """
+        base_url, api_key = OpenRouterService._resolve_config(
+            api_key=api_key,
+            base_url=base_url,
+        )
+
+        payload: dict[str, Any] = {
+            "model": model_slug,
+            "messages": messages,
+            "stream": True,
+        }
+        if temperature is not None:
+            payload["temperature"] = temperature
+        if top_p is not None:
+            payload["top_p"] = top_p
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+
+        url = base_url.rstrip("/") + "/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+        final_response = None
+        final_usage = None
+
+        timeout = httpx.Timeout(30.0, read=30.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            try:
+                async with client.stream("POST", url, json=payload, headers=headers) as response:
+                    if response.status_code >= 400:
+                        raw_json = await OpenRouterService._read_error_payload_async(response)
+                        yield {
+                            "type": "error",
+                            "error_code": OpenRouterService._extract_error_code(raw_json) or "http_error",
+                            "error_message": f"OpenRouter HTTP {response.status_code}",
+                            "raw": raw_json,
+                        }
+                        return
+
+                    async for line in response.aiter_lines():
+                        line_str = line.strip()
+                        if not line_str or line_str == "[DONE]":
+                            continue
+                        if line_str.startswith("data: "):
+                            line_str = line_str[6:]
+                        try:
+                            chunk = json.loads(line_str)
+                            if chunk.get("usage"):
+                                final_response = chunk
+                                final_usage = chunk.get("usage")
+                            delta = (chunk.get("choices") or [{}])[0].get("delta", {}).get("content", "")
+                            yield {
+                                "type": "delta",
+                                "delta": delta or "",
+                                "raw_chunk": chunk,
+                            }
+                        except json.JSONDecodeError:
+                            continue
+
+                if final_usage:
+                    yield {
+                        "type": "done",
+                        "delta": "",
+                        "usage": {
+                            "prompt_tokens": final_usage.get("prompt_tokens"),
+                            "completion_tokens": final_usage.get("completion_tokens"),
+                            "total_tokens": final_usage.get("total_tokens"),
+                        },
+                        "raw_response": final_response,
+                    }
+                else:
+                    yield {
+                        "type": "done",
+                        "delta": "",
+                        "usage": {
+                            "prompt_tokens": None,
+                            "completion_tokens": None,
+                            "total_tokens": None,
+                        },
+                        "raw_response": None,
+                    }
+            except httpx.RequestError as exc:
+                yield {
+                    "type": "error",
+                    "error_code": "network_error",
+                    "error_message": str(exc),
+                    "raw": {"detail": str(exc)},
+                }
+
     # ------------------------------------------------------------------
     # INTERNAL HELPERS
     # ------------------------------------------------------------------
@@ -204,6 +319,22 @@ class OpenRouterService:
         if not api_keys:
             raise OpenRouterConfigError("OPENROUTER_API_KEYS is not configured.")
         return base_url, api_keys
+
+    @classmethod
+    def _resolve_config(
+        cls,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ) -> tuple[str, str]:
+        if api_key:
+            resolved_key = api_key
+        else:
+            cfg_base, api_keys = cls._get_openrouter_config()
+            resolved_key = cls._select_api_key(api_keys)
+            if not base_url:
+                base_url = cfg_base
+        resolved_base_url = base_url or os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+        return resolved_base_url, resolved_key
 
     @classmethod
     def _select_api_key(cls, api_keys: list[str]) -> str:
@@ -242,5 +373,13 @@ class OpenRouterService:
         try:
             raw = exc.read().decode("utf-8")
             return json.loads(raw)
+        except Exception:
+            return {"detail": "OpenRouter error response could not be parsed."}
+
+    @staticmethod
+    async def _read_error_payload_async(response: httpx.Response) -> dict[str, Any]:
+        try:
+            raw = await response.aread()
+            return json.loads(raw.decode("utf-8"))
         except Exception:
             return {"detail": "OpenRouter error response could not be parsed."}

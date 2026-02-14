@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from rest_framework_simplejwt.views import TokenRefreshView
+from rest_framework.permissions import AllowAny
 from drf_spectacular.utils import (
     extend_schema,
     OpenApiExample,
@@ -32,6 +33,7 @@ AuthErrorResponseSerializer = inline_serializer(
 
 
 class RefreshAPIView(TokenRefreshView):
+    permission_classes = [AllowAny]
     @extend_schema(
         request=TokenRefreshRequestSerializer,
         responses={

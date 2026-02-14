@@ -87,10 +87,15 @@ class MessageListCreateAPIView(APIView):
 
             preference = LLMChatSelectors.get_user_preferences(request.user)
             model_used = self._resolve_model(preference)
+            credential_used = None
             temperature = preference.temperature if preference else None
             top_p = preference.top_p if preference else None
             max_tokens = preference.max_tokens if preference else None
             system_prompt = preference.system_prompt if preference else None
+
+            if preference and preference.default_credential and model_used:
+                if preference.default_credential.provider_id == model_used.provider_id:
+                    credential_used = preference.default_credential
 
             if not model_used:
                 model_used = LLMChatSelectors.list_active_models().first()
@@ -120,6 +125,8 @@ class MessageListCreateAPIView(APIView):
                     temperature=float(temperature) if temperature is not None else None,
                     top_p=float(top_p) if top_p is not None else None,
                     max_tokens=max_tokens,
+                    api_key=credential_used.secret if credential_used else None,
+                    base_url=model_used.provider.base_url or None,
                 )
                 assistant_text = result.get("assistant_text", "")
                 usage = result.get("usage") or {}
@@ -130,6 +137,7 @@ class MessageListCreateAPIView(APIView):
                     conversation=conversation,
                     content=assistant_text,
                     model_used=model_used,
+                    credential_used=credential_used,
                     usage=usage,
                     cost=cost,
                     raw_response=raw,
@@ -156,6 +164,7 @@ class MessageListCreateAPIView(APIView):
                     conversation=conversation,
                     content="",
                     model_used=model_used,
+                    credential_used=credential_used,
                     usage=None,
                     cost=None,
                     raw_response=exc.raw,
